@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "./components/Sidebar";
+import Image from 'next/image';
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -32,7 +33,7 @@ export default function RootLayout({
             {/* Top Header Bar */}
             <header className="sticky top-0 z-30 w-full bg-gradient-to-r from-gray-900/80 to-gray-800/80 border-b border-gray-800/60 px-8 py-4 flex items-center justify-between shadow-sm backdrop-blur-md">
               <div className="flex items-center gap-3">
-                <img src="/globe.svg" alt="Logo" className="w-8 h-8" />
+                <Image src="/globe.svg" alt="Logo" className="w-8 h-8" width={32} height={32} />
                 <span className="text-2xl font-bold tracking-tight">Sonic <span className="text-orange-500">Points</span></span>
               </div>
               <div className="flex items-center gap-4">

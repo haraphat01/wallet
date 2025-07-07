@@ -1,5 +1,4 @@
 import {
-  ArrowLeft,
   Home,
   TrendingUp,
   Award,

@@ -3,7 +3,6 @@
 import {
   ExternalLink,
   Users,
-  X,
   Coins,
   Grid3X3,
   Trophy,
